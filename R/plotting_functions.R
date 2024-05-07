@@ -18,16 +18,6 @@ custom_theme <- function(is_figure_small = FALSE, remove_legend = T){
   return(t)
 }
 
-
-plot_feature <- function(data, x_var, y_var, palette = NULL, paired = FALSE){
-  is_numeric <- is.numeric(data[[feature]])
-  if (is_numeric) ggp <- geom_point_with_corr(data, x_var, y_var)
-  else ggp <- geom_boxplot_general(data, x_var, y_var, palette = palette) + 
-      ggpubr::stat_compare_means(label.x.npc = 0.5, label = "p.signif", paired = paired) +
-      ggpubr::stat_compare_means(label.x.npc = 0.6,label.y.npc = 0, paired = paired)
-  return(ggp)
-}
-
 geom_point_with_corr <- function(data, x_var, y_var, add_rmse = FALSE, color_var = NULL){
   x_var_label <- gsub("_", " ", x_var) %>% stringr::str_to_title()
   y_var_label <- gsub("_", " ", y_var) %>% stringr::str_to_title()
@@ -69,20 +59,4 @@ geom_boxplot_general <- function(data, x_var, y_var, color_var = NULL, palette =
       scale_fill_manual(values = palette)}
   
   return(ggp)
-}
-
-geom_longitudinal_line <- function(data, y_var,
-                                   x_var = "timepoint",
-                                   group_var = "subject",
-                                   color_var = "subject", 
-                                   hline_intercept = 0) {
-  ggp <- ggplot(data, 
-                aes_string(x_var, y_var, group = group_var, color = color_var)) +
-         geom_point() + geom_line()
-  
-  if (is.numeric(hline_intercept)) {
-    ggp <- ggp + geom_hline(yintercept = hline_intercept, linetype = "dashed")}
-  
-  return(ggp)
-  
 }
