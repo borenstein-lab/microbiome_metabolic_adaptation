@@ -1,0 +1,266 @@
+---
+title: "Figures 3 and 4 - alpha and beta diversity measures"
+author: "Alisa Greenberg"
+date: "April 2024"
+output:
+  html_document:
+    css: custom_notebook_formatting.css
+    toc: true
+    toc_depth: 3
+    df_print: paged
+    code_folding: hide
+    number_sections: yes
+---
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, fig.width=6, fig.height=4) 
+```
+
+```{r warning=FALSE, message=FALSE, include=FALSE}
+library("dplyr")
+library("ggplot2")
+library("readr")
+library("tidyr")
+
+theme_set(theme_bw(base_size = 12))
+files.sources = file.path("R",list.files(path = "R"))
+sapply(files.sources, source)
+
+response_colors <- c( "No response" = "#CB5F8A", "Response" = "#0080D2")
+feat_table_dir <- "feature_tables"
+```
+
+# Data import and preparation
+```{r}
+# Data import
+extract_metadata_from_sample_name <- function(data, sample_var = "sample"){
+  data <- data %>% 
+          mutate(subject = stringr::str_extract(!!sym(sample_var),"[0-9]+"),
+                 subject = paste0("subject_",subject),
+                 timepoint = stringr::str_extract(!!sym(sample_var), "PRE|POST"),
+                 timepoint = factor(tolower(timepoint),levels = c("pre", "post")))
+  return(data)
+}
+```
+
+```{r}
+## Metadata
+metadata <- read.csv("metadata/metadata.csv") %>% 
+  mutate(response = ifelse(response == "response", "Response", "No response"))
+```
+
+```{r}
+## Select key features for downstreatm analysis
+features <- c("subject", "response", "tdee_adaptation", "rmr_adaptation")
+metadata_subject_level <- metadata %>% select(features)
+```
+
+```{r}
+sample_mapping <- rbind(metadata_subject_level %>% mutate(timepoint = "PRE"),
+                        metadata_subject_level %>% mutate(timepoint = "POST"))
+sample_mapping <- sample_mapping %>%
+                  mutate(sample = paste(subject, timepoint, sep = "_"),
+                         subject_number = gsub("subject_", "", subject),
+                         sample_id = paste("ARE",subject_number,timepoint,
+                                           "CP04693_L001", sep = "_"),
+                         response = factor(response),
+                         timepoint = factor(timepoint, levels = c("PRE","POST"))) %>%
+                  filter(sample != "subject_15_POST") # Missing sample
+```
+
+
+```{r}
+## Alpha diversity 
+shannon <- read_delim("feature_tables/shannon.tsv", 
+                      delim = "\t", escape_double = FALSE, 
+                      col_names = c('sample_id', 'shannon'), 
+                      skip = 1, trim_ws = TRUE, show_col_types = FALSE) %>% 
+           extract_metadata_from_sample_name("sample_id")
+
+## Beta diversity
+bc <- read_tsv2("feature_tables/bc.tsv") %>% rename(sample_id = 1)
+wuf <- read_tsv2("feature_tables/w_unifrac.tsv") %>% rename(sample_id = 1)
+
+# Organize in lists for convenience
+alpha_dfs <- list("shannon"=shannon)
+distances_dfs <- list("Bray_Curtis"=bc, "Weighted_UniFrac"=wuf)
+```
+
+```{r}
+## Setup feature names for plotting
+feature_dict <- list("response" = "Response to training",
+                     "tdee_adaptation" = "TDEE adaptation [Kcal]",
+                     "rmr_adaptation" = "RMR adaptation [Kcal]")
+
+metric_dict_alpha <- list("shannon" = "Shannon",
+                          "shannon_delta" = "\u0394 Shannon")
+
+metric_dict_beta <- list("Bray_Curtis" = "Bray Curtis",
+                          "Weighted_UniFrac" = "Weighted UniFrac")
+```
+
+# Analysis 
+## Figures 3A and S3 - beta diversity distances between response gorups and time points (PCoA)
+Test if response groups create distinct clusters (rejecting H0 of the clusters having equivalent centroids and dispersion)
+
+```{r}
+pvals <- data.frame()
+res_list <- list()
+for (metric_name in names(distances_dfs)){
+    ## Data setup
+    ggdata <- sample_mapping
+    samples <- ggdata$sample_id
+    dist_matrix <- distances_dfs[[metric_name]] %>% 
+                   filter(sample_id %in% samples) %>%
+                   select(sample_id, samples)
+    
+    ## Calculation
+    res <- get_permanova(disct_metadata = ggdata,  
+                      dist_matrix = dist_matrix,
+                      dist_metric_name = metric_name,
+                      sample_id_column = 'sample_id', 
+                      metadata_cols_to_analyze = c("response"),
+                      fdr_threshold = 1,
+                      pcoa_fill = response_colors) 
+    res_list[[metric_name]] <- res$plots
+    pval <- res$results %>% mutate(feature = metric_name)
+    pvals <- rbind(pvals, pval)
+  }
+```
+
+
+
+```{r}
+pvals %>% rename(p_value = pvals) %>% 
+          mutate(FDR = p.adjust(p_value, "fdr")) %>% 
+          select(feature,p_value, FDR)
+```
+
+PCoA plotting of samples by response - arrows connect pre-post training samples of the same subject
+```{r}
+for (metric_name in names(distances_dfs)){
+    tmp <- distances_dfs[[metric_name]] %>% left_join(sample_mapping, by = "sample_id")
+    bd <- betadisper(d = as.dist(tmp %>% select(tmp$sample_id)), group = unname(tmp$response), bias.adjust = TRUE)
+    abd <- anova(bd)
+    pbd <- permutest(bd, permutations = 999)
+    print(paste("####", metric_name, "####"))
+    print(abd)
+    print(pbd)
+
+    ## Plot PCoA
+    arrow_positions <- res_list[[metric_name]][["response_pc1&pc2"]]$data %>% 
+                       select(subject, timepoint,response, Axis.1, Axis.2) %>% 
+                       tidyr::pivot_wider(names_from = timepoint, values_from = c(Axis.1, Axis.2)) %>% 
+                       na.omit()
+    
+    ggp <- res_list[[metric_name]][["response_pc1&pc2"]] + 
+           labs(fill = "", title = "", color = "") + 
+           scale_fill_manual(values = response_colors) + 
+      geom_curve(data = arrow_positions, 
+                aes(x = Axis.1_PRE, xend = Axis.1_POST,
+                    y = Axis.2_PRE, yend = Axis.2_POST),
+                arrow = arrow(length=unit(0.2,"cm")), size = 0.25) 
+    plot(ggp)
+    ggp
+    ggsave(plot = ggp + custom_theme() ,height = 4, width = 4,  filename = glue::glue("plots/pcoa_{metric_name}.png"))
+}
+legend <- ggp %>% cowplot::get_legend() %>% ggpubr::as_ggplot()
+ggsave(plot = legend ,height = 4, width = 4,  filename = glue::glue("plots/pcoa_legend.png"))
+```
+
+```{r}
+df_list <- list()
+for (metric_name in names(distances_dfs)){
+  df_list[[metric_name]] <-  distances_dfs[[metric_name]] %>% 
+         tidyr::pivot_longer(cols = -sample_id, names_to = "sample_id_2", values_to = metric_name) 
+}
+```
+
+```{r}
+beta_div_all <- df_list %>% purrr::reduce(left_join, by = c("sample_id", "sample_id_2"))
+
+samples <- beta_div_all$sample_id %>% unique()
+sample_pairs_unique <- combn(samples, 2)%>% t() %>% as.data.frame() %>% 
+                       rename(sample_id = V1,  sample_id_2 = V2)
+
+beta_div_all <- beta_div_all %>% inner_join(sample_pairs_unique, by = c("sample_id", "sample_id_2")) %>% 
+            mutate(subject_1 = stringr::str_extract(sample_id,"ARE_[0-9]*" ),
+                  subject_2 = stringr::str_extract(sample_id_2,"ARE_[0-9]*"),
+                  subject_1 = gsub("ARE", "subject", subject_1),
+                  subject_2 = gsub("ARE", "subject", subject_2),
+                  timepoint_1 = stringr::str_extract(sample_id,"PRE|POST"),
+                  timepoint_2 = stringr::str_extract(sample_id_2,"PRE|POST"))
+
+beta_div <- beta_div_all %>% 
+            left_join(metadata %>% select(subject, response), by = c("subject_1" = "subject")) %>% 
+            left_join(metadata %>% select(subject, response), by = c("subject_2" = "subject")) %>% 
+            filter(response.x == response.y) %>% rename(response = response.x)
+```
+
+Calculate distance between subject pairs within a response group
+```{r}
+beta_div_within_tp <- beta_div %>% filter(timepoint_1 == timepoint_2)
+res <- data.frame(matrix(nrow = 0, ncol = 4))
+colnames(res) <- c("metric", "timepoint", "effsize", "p_value")
+
+for (tp in c("PRE", "POST")){
+  ggp_list <- list()
+  for (metric_name in names(distances_dfs)){
+    ggdata <- beta_div_within_tp %>% filter(timepoint_1 == tp)
+    
+    # Calculate wilcox manullay for multiple testing correction
+    wilcox <- wilcox.test(data = ggdata, as.formula(paste0(metric_name,"~response")), paired = F)
+    wilcox_r <- rstatix::wilcox_effsize(data = ggdata, as.formula(paste0(metric_name,"~response")),paired = F )
+    res[nrow(res)+1, ] <- c(metric_name, tp,wilcox_r$effsize[[1]], wilcox$p.value)
+    
+    # Plot pairwise beta diversity between response groups across timepoint and beta diversity metrics
+    ggp <- geom_boxplot_general(ggdata, "response", metric_name,
+                               group_var = NULL, palette = response_colors) +
+          #labs(title = paste(metric_dict_beta[[metric_name]], tolower(tp), "training")) +
+          custom_theme(is_figure_small = T)
+    ggp_list[[paste(metric_name)]] <- ggp
+    ggsave(plot = ggp, filename = glue::glue("plots/response_{metric_name}_{tp}_training.png"),
+           height = 4, width = 4)
+  }
+  margin = theme(plot.margin = unit(c(0.5,0.5,0.5,0.5), "cm"))
+  ggp <- gridExtra::grid.arrange(grobs = lapply(ggp_list, "+", margin), ncol = 2)
+}
+res$p_value_adj <- p.adjust(res$p_value, method = "fdr")
+res
+```
+
+## Figures 3B, 3C, 3D and 3E - alpha diversity correlation to RMR/TDEE adaptation
+```{r}
+alpha_diversity <- shannon %>% left_join(metadata_subject_level, by = "subject")
+alpha_diversity %>% head()
+```
+
+```{r}
+alpha_div_delta <- alpha_diversity %>% select(subject, timepoint, shannon) %>% 
+          tidyr::pivot_wider(names_from = "timepoint", values_from = c("shannon")) %>% 
+          mutate(shannon_delta = post - pre) %>% 
+          select(subject, shannon_delta)
+```
+
+```{r}
+ggdata <- alpha_diversity %>% filter(timepoint == "pre") %>% 
+          left_join(alpha_div_delta, by = "subject")
+```
+
+```{r, fig.width= 4, fig.height = 4}
+features <- c("tdee_adaptation", "rmr_adaptation")
+for (alpha_div in c(names(metric_dict_alpha))){
+  for (feature in features){
+    ggp <- geom_point_with_corr(ggdata, alpha_div, feature, color_var = "response") + 
+            labs(x = paste(metric_dict_alpha[[alpha_div]],"index"),
+                 y = feature_dict[[feature]],
+                 color = "Response\nto training") + 
+           scale_color_manual(values = response_colors) +
+        custom_theme(is_figure_small = T)
+    plot(ggp)
+    ggsave(plot = ggp, height = 4, width = 4,
+           filename = glue::glue("plots/{alpha_div}_{feature}_corr.png"))
+  }
+}
+```
+

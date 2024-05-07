@@ -1,0 +1,213 @@
+---
+title: "Figure 1"
+author: "Alisa Greenberg"
+date: "April 2024"
+output:
+  html_document:
+    css: custom_notebook_formatting.css
+    toc: true
+    toc_depth: 3
+    df_print: paged
+    code_folding: hide
+    number_sections: yes
+---
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, fig.width=6, fig.height=4) 
+```
+
+```{r warning=FALSE, message=FALSE}
+library("dplyr")
+library("ggplot2")
+files.sources = file.path("R",list.files(path = "R"))
+sapply(files.sources, source)
+
+theme_set(theme_bw(base_size = 12))
+```
+
+# plotting setup
+```{r}
+response_colors <- c("No response" = "#CB5F8A", "Response" = "#0080D2",
+                     "pre" = "#b26636", "post" = "#00827D",
+                     "Pre\ntraining" = "#b26636", "Post\ntraining" = "#00827D"
+                     )
+mass_type_colors <- c("Fat-free mass" = "#cb5f8a", "Fat mass" = "#FFAE65")
+theme_set(theme_bw())
+```
+
+```{r}
+label_dict <- c("pre" = "Pre training",
+                "post" = "Post training",
+                "response" = "Response", 
+                "no_response" = "No response")
+```
+
+
+# Data loading
+```{r}
+metadata <- read.csv("metadata/metadata.csv") %>% 
+            mutate(response = ifelse(response == "response", "Response", "No response"))
+```
+
+# Analysis 
+## Figure 1 and S1
+### Figure 1B - definition of response by change in FM and FFM
+```{r}
+ggdata <- metadata %>% 
+          select(subject,response, gender, fm_kg_delta, ffm_delta) %>% 
+          tidyr::pivot_longer(cols = c("fm_kg_delta", "ffm_delta")) %>% 
+          mutate(name = case_when(name == "fm_kg_delta" ~ "Fat mass",
+                                  name == "ffm_delta" ~ "Fat-free mass"),
+                 subject =stringr::str_to_title(gsub("_"," ",subject)))
+```
+
+Subject weight changes (sorted by net. weight change)
+```{r, }
+ggp <- ggplot(ggdata, aes( x=reorder(subject, value,  function(x){ sum(x) }), y=value, fill=name)) + 
+       geom_bar(position="stack", stat="identity", alpha = 0.7) + 
+       scale_fill_manual(values = mass_type_colors) + 
+       geom_hline(yintercept = 0, linetype = "dashed") + 
+       labs(y = "Change from baseline [Kg]", x = "", 
+            title = "Delta weight between post and pre training [Kg]") + 
+       coord_flip()
+plot(ggp + labs(subtitle = paste(strrep(" ", 10),"Mass loss",strrep(" ", 40) ,"Mass gain")))
+```
+
+Subject weight changes (sorted by response)
+```{r}
+ggp_facet <- ggp+ facet_wrap(~response, scales = "free_y") + custom_theme() +ggtitle("")
+legend <- ggp %>% cowplot::get_legend() %>% ggpubr::as_ggplot()
+ggp_facet
+ggsave(ggp_facet, filename = "plots/response_barplot.png", width =7, height = 3.5)
+ggsave(legend, filename = "plots/response_barplot_legend.png", width =2, height = 2)
+
+```
+
+### Figure 1C - weight pre vs post scatterplot
+```{r}
+ggp <- ggplot(metadata, aes(weight_pre, weight_post, color = response)) + 
+       geom_abline(slope =1, intercept = 0, linetype = "dashed") +
+       geom_point(size = 3, alpha = 0.5) + 
+       scale_color_manual(values = response_colors) +
+       labs(x= "Total weight pre-training [Kg]",
+            y = "Total weight post-training [kg]",color = "Response\nto training") +
+  theme(legend.key = element_blank(),
+        legend.background=element_blank(),
+        legend.position = c(0.8,0.15),
+        legend.title.align=0.5) + custom_theme(is_figure_small = T, remove_legend = F)
+plot(ggp)
+ggsave(ggp, filename = "plots/weight_pre_post_scatter.png", width =3.5, height = 3.5)
+```
+
+```{r}
+# Data preparation
+for (feature in c("weight", "fm_kg", "ffm")){
+ggdata <- metadata %>% 
+          select(subject,response, paste(feature, c("pre", "post"), sep = "_")) %>% 
+          tidyr::pivot_longer(cols = starts_with(feature),
+                              names_to = "timepoint", values_to = feature) %>% na.omit()
+
+p_r <- ggdata %>% filter(response == "Response") %>% 
+            wilcox.test(as.formula(paste0(feature,"~timepoint")), data = ., paired = TRUE)
+p_nr <- ggdata %>% filter(response == "No response") %>% 
+             wilcox.test(as.formula(paste0(feature,"~timepoint")), data = ., paired = TRUE)
+
+print(paste(feature,": Wilcoxon test - Response (pre vs post):", round(p_r$p.value,4)))
+print(paste(feature,": Wilcoxon test - Non response (pre vs post):",  round(p_nr$p.value,4)))
+}
+```
+
+
+### Figure 1D - VO2max differences between responders and non-responders, pre and post training
+```{r}
+# Data preparation
+feature = "vo2max"
+ggdata <- metadata %>% 
+          select(subject,response, paste(feature, c("pre", "post"), sep = "_")) %>% 
+          tidyr::pivot_longer(cols = starts_with(feature),
+                              names_to = "timepoint", values_to = feature) %>% na.omit()
+
+# For paired analysis, keep only subjects with 2 measurements (subject 15 is missing the post training measurement)
+subject_missing_data <- ggdata %>% count(subject) %>% filter(n == 1) %>% pull(subject)
+
+ggdata <- ggdata %>% filter(!subject %in% subject_missing_data) %>% 
+          mutate(timepoint = gsub(paste0(feature,"_"), "", timepoint), 
+                 timepoint = factor(timepoint, levels =  c("pre", "post")))
+```
+
+VO2max pre vs post (regardless of response group) - non significant
+```{r}
+wilcox <- ggdata %>% wilcox.test(as.formula(paste0(feature,"~timepoint")), data = ., paired = TRUE)
+print(wilcox$p.value)
+
+ggp <- geom_boxplot_general(ggdata, "timepoint",  feature, group_var = "subject") + 
+  scale_x_discrete(labels = label_dict)+
+  scale_color_manual(values = response_colors) + 
+  scale_fill_manual(values = response_colors) + 
+  labs(x = "Time point", y = "VO2 max") + 
+  custom_theme(is_figure_small = T)
+plot(ggp)
+```
+
+VO2max paired pre vs post by response group - significant increase only in responders
+```{r}
+# wilcoxon test by group
+p_r <- wilcox.test(as.formula(paste0(feature,"~timepoint")),
+                          data = ggdata %>% filter(response == "Response"), paired = TRUE)
+p_nr <- wilcox.test(as.formula(paste0(feature,"~timepoint")),
+                          data = ggdata %>% filter(response != "Response"), paired = TRUE)
+print(paste("Wilcoxon test - Response (pre vs post):", p_r$p.value))
+print(paste("Wilcoxon test - Non response (pre vs post):", p_nr$p.value))
+
+# plot faceted by response
+ggp_response <- ggp + facet_wrap(~response)
+plot(ggp_response)
+ggsave(ggp_response, filename = glue::glue("plots/{feature}_response_boxplot.png"), width =7, height = 3.5)
+
+```
+
+### Suplementory figure S1 - Pre-training values of possible confounders between response groups
+
+Test differences in categorical features (gender) by a Fisher test
+```{r, fig.height=3, fig.width=3}
+pval <- (metadata %>% select(gender, response) %>% table() %>% fisher.test())$p.value
+
+ggp <- ggplot(metadata %>% count(gender, response),
+       aes(gender,response, fill = n, label = n )) + 
+       scale_fill_gradient(low = "#FFAE65", high = "#cb5f8a") + 
+       geom_tile(alpha = 0.7) + geom_label(fill = "white") + custom_theme() + 
+       labs(x = "Subject gender", y = "Response to training",
+            fill = "# subjects", 
+            subtitle = paste("Fisher's exact test\np-value:", round(pval,4)))
+ggp
+ggsave(ggp, filename = "plots/response_gender_fisher.png", width =2.5, height = 2.5)
+```
+
+Test differences in pre-training continues features across groups (FDR corrected wilcox rank-sum test)
+```{r}
+features <- c( "age","bmi_pre",  "ffm_pre", "fm_kg_pre","extime_perwk", "caloric_intake_pre", "caloric_intake_post")
+feature_names <- c("Age [years]", "BMI pre training",
+                   "FFM pre training [Kg]", "FM pre training [Kg]",
+                   "Mean exercise time\n[min/week]", "Mean Caloric intake\npre-training [Kcal/day]",
+                   "Mean Caloric intake\npost-training [Kcal/day]")
+names(feature_names) <- features
+```
+
+```{r fig.height= 6, fig.width=6}
+ggp_list <- list()
+pvals <- c()
+
+for(feature in features){
+ggp_list[[feature]] <- geom_boxplot_general(metadata, "response",  feature, "response", response_colors) + 
+      theme(legend.position = "none") + custom_theme(is_figure_small = T) + 
+      labs(x = "", y= feature_names[[feature]]) #y= toupper(gsub("_pre","", feature)))
+
+  wilcox <- metadata %>% wilcox.test(as.formula(paste0(feature,"~response")), data = ., paired = FALSE)
+  pvals <- c(pvals, wilcox$p.value)
+}
+pvals_adj <- p.adjust(pvals, method = "fdr")
+res <- data.frame(feature_names, round(pvals,4), round(pvals_adj,4))
+res
+ggp <- do.call(gridExtra::grid.arrange,  c(ggp_list, ncol = 3, top = ""))
+ggsave(ggp, filename = "plots/confounding_response_features_boxplot.png", width =9, height = 8)
+```

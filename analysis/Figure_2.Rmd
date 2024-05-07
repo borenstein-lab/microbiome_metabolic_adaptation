@@ -1,0 +1,261 @@
+---
+title: "Figure 2"
+author: "Alisa Greenberg"
+date: "April 2024"
+output:
+  html_document:
+    css: custom_notebook_formatting.css
+    toc: true
+    toc_depth: 3
+    df_print: paged
+    code_folding: hide
+    number_sections: yes
+---
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, fig.width=6, fig.height=4) 
+```
+
+```{r warning=FALSE, message=FALSE, include=FALSE}
+library("dplyr")
+library("ggplot2")
+library("readr")
+library("tidyr")
+library("pROC") 
+
+theme_set(theme_bw())
+files.sources = file.path("R",list.files(path = "R"))
+sapply(files.sources, source)
+
+response_colors <- c( "No response" = "#CB5F8A", "Response" = "#0080D2")
+feat_table_dir <- "feature_tables"
+```
+
+# Data import and preparation
+```{r}
+# Data import
+extract_metadata_from_sample_name <- function(data, sample_var = "sample"){
+  data <- data %>% 
+          mutate(subject = stringr::str_extract(!!sym(sample_var),"[0-9]+"),
+                 subject = paste0("subject_",subject),
+                 timepoint = stringr::str_extract(!!sym(sample_var), "PRE|POST"),
+                 timepoint = factor(tolower(timepoint),levels = c("pre", "post")))
+  return(data)
+}
+```
+
+```{r}
+## Metadata
+metadata <- read.csv("metadata/metadata.csv") %>% 
+  mutate(response = ifelse(response == "response", "Response", "No response"))
+```
+
+```{r}
+## Select key features for downstreatm analysis
+features <- c("subject", "response", "tdee_adaptation", "rmr_adaptation")
+metadata_subject_level <- metadata %>% select(features)
+```
+
+```{r}
+sample_mapping <- rbind(metadata_subject_level %>% mutate(timepoint = "PRE"),
+                        metadata_subject_level %>% mutate(timepoint = "POST"))
+sample_mapping <- sample_mapping %>%
+                  mutate(sample = paste(subject, timepoint, sep = "_"),
+                         subject_number = gsub("subject_", "", subject),
+                         sample_id = paste("ARE",subject_number,timepoint,
+                                           "CP04693_L001", sep = "_"),
+                         response = factor(response),
+                         timepoint = factor(timepoint, levels = c("PRE","POST"))) %>%
+                  filter(sample != "subject_15_POST") # Missing sample
+```
+
+## Figure 2
+```{r}
+## Relative abundance 
+kraken_sp <- read_tsv2("feature_tables/kraken_species_level_taxonomy.tsv")
+kraken_sp <- reorganize_kraken_table(kraken_sp)
+ra_kraken_sp <- convert_to_relab(kraken_sp)
+
+ra_kraken_dfs <- list("species"=ra_kraken_sp)
+```
+
+SUbset the data for species with sufficient amount of samples
+```{r}
+ra_kraken_sp_baseline <- ra_kraken_sp %>% filter(sample_id %in% grep("PRE",ra_kraken_sp$sample_id, value = T))
+min_n_samples <- (nrow(metadata) * 0.8) %>% round()
+sp_with_sufficient_samples <- colSums(ra_kraken_sp_baseline %>% select(-sample_id) != 0)
+sp_with_sufficient_samples <- sp_with_sufficient_samples[sp_with_sufficient_samples > min_n_samples] %>% names()
+
+sp_mean_abundance <- ra_kraken_sp_baseline %>% 
+                    select(sp_with_sufficient_samples) %>% 
+                    apply(., 2, function(x) mean(x, na.rm = TRUE)) %>% 
+                    data.frame() %>% rename(mean_abundance = ".") %>%
+                    tibble::rownames_to_column("species") 
+
+sp_with_sufficient_samples <- sp_mean_abundance %>% filter(mean_abundance > 0.0005)
+```
+
+```{r}
+gtdb_species <- c(grep("Faecalibacterium.prausnitzii",sp_with_sufficient_samples$species, value = TRUE))
+ncbi_targets <- c("Faecalibacterium.sp003449675","Faecalibacterium.sp900539885","Faecalibacterium.sp900540455",
+                  "Faecalibacterium.sp905215595")
+target_species <- intersect(sp_with_sufficient_samples$species, c(gtdb_species, ncbi_targets))
+
+target_species_ra <- ra_kraken_sp %>% select(sample_id, target_species) %>% 
+                     extract_metadata_from_sample_name("sample_id")
+
+target_species_df <- metadata_subject_level %>%
+                     left_join(metadata %>% select(subject, tef_4hours_pre, rer_pre), by = c("subject")) %>%
+                     left_join(target_species_ra , by = c("subject"))
+```
+
+
+```{r}
+species_ra <- ra_kraken_sp  %>% 
+              select(sample_id, sp_with_sufficient_samples$species) %>% 
+              extract_metadata_from_sample_name("sample_id") %>% filter(timepoint == "pre")
+
+data <- metadata_subject_level %>% left_join(species_ra , by = c("subject")) %>% 
+              mutate(response = factor(response, levels = c("Response", "No response")))
+```
+
+```{r message=FALSE, warning=FALSE}
+feature_vec <- c()
+auc_vec <- c()
+roc_df <- data.frame()
+random_seed <- 100
+
+features <- sp_with_sufficient_samples$species
+for (feature_name in features){
+  feature_vec <- c(feature_vec, feature_name)
+  cv_roc <- calculate_cv_roc(data, 
+                             features = c(feature_name),
+                             target = "response",
+                             n_ml_shuffle = 0,
+                             n_ml_folds = 3,
+                             rand_seed = random_seed)
+  
+  roc <- cv_roc[["roc"]] %>% mutate(feature = feature_name)
+  roc_df <- bind_rows(roc_df, roc)
+  
+  auc <- cv_roc$auc[["auc"]]
+  auc_vec <- c(auc_vec, auc)
+}
+auc_df <- data.frame(feature = feature_vec, auc = auc_vec) %>%
+          mutate(target_flag = ifelse(feature %in% target_species, "Target", "Other"),
+                  is_highly_predictive = auc > 0.8)
+roc_df <- roc_df %>% mutate(target_flag = ifelse(feature %in% target_species, "Target", "Other"),
+                            is_highly_predictive = auc > 0.8)
+# write.csv(auc_df, "plots/auc_response_by_species_abundanc.csv")
+```
+
+### Statistics - test enrichment of F.Prausnitzii subspecies in the top of the species ranking by ROCAUC
+
+Calculate median, mean and starndard deviation of species groups ROCAUC
+```{r}
+auc_df %>% group_by(target_flag) %>% summarise(median = median(auc), mean= mean(auc), SD = sd(auc))
+```
+
+Check the enrichment of target species at the top of the AUC ranks
+```{r}
+auc_df <- auc_df %>% arrange(desc(auc))
+target_ranks <- match(target_species, auc_df$feature) 
+enrichement_pval <- gsEasy::gset(S = target_ranks, N = nrow(auc_df))
+
+enrichement_pval_Other <- replicate(n=10, expr=gsEasy::gset(S=sample.int(n=nrow(auc_df), size=length(target_species)), N=nrow(auc_df)))
+target_auc <- auc_df %>% filter(target_flag == "Target") %>% pull(auc)
+Other_auc <- auc_df %>% filter(target_flag != "Target") %>% pull(auc)
+wilcox.test(target_auc,  Other_auc)
+```
+
+### Figure 2A - ROC curves for response prediction based on single-species pre-training relative abundance
+```{r}
+ggdata <- auc_df %>% filter(is_highly_predictive) %>% 
+          mutate(name_for_plotting = gsub("CAG.303", "CAG_303",feature),
+                 name_for_plotting = gsub("\\.", "\n",name_for_plotting))
+
+species_palette <- c(
+  "black",
+"#00827D",
+"#0080D2",
+"#5D74D0",
+"#AA64B3",
+"#CB5F8A",
+"#ED727F",
+"#FF8D71",
+"#FFAE65")
+names(species_palette) <- ggdata$name_for_plotting
+```
+
+```{r}
+list_curves <- list()
+for (g in ggdata$feature){
+  roc_df <- calculate_cv_roc(data, c(g), "response", n_ml_shuffle = 0, n_ml_folds = 3,rand_seed = random_seed, smooth_roc =F)
+  list_curves[[g]] <- roc_df$rocs[["0"]]
+}
+names(list_curves) <- ggdata$name_for_plotting
+ggp <- ggroc(list_curves,size = 1.5, alpha = 0.7) +  
+  annotate("segment",x = 1, xend = 0, y = 0, yend = 1, color="black", linetype="dashed") +
+  scale_color_manual(values = species_palette) +
+  labs(color = "Species") + #theme(text = element_text(family = "Outfit",size = 12)) +
+  custom_theme()
+plot(ggp)
+#ggsave(plot = ggp, filename = "plots/top_species_roc_curves.png", height = 5, width = 5)
+```
+
+### Figure 2B - ROCAUC values for response prediction based on single-species pre-training relative abundance
+```{r}
+ggp <-  ggplot(ggdata, aes(reorder(name_for_plotting,auc), auc, fill = name_for_plotting)) + 
+        geom_col(alpha = 0.8) + coord_flip() + 
+        scale_fill_manual(values = species_palette) +
+        labs(y = "AUROC", x = "") + custom_theme() + 
+        ylim(0,1) + geom_hline(yintercept = 0.5, linetype = "dashed")
+plot(ggp)
+#ggsave(plot = ggp, filename = "plots/top_species_auc_bar.png", height = 3.5, width = 4)
+```
+
+### Figure 2S 
+
+Test if the relative abundances of highly predictive species are significantly different between response groups pre-training
+```{r}
+target_species <- auc_df %>% filter(is_highly_predictive) %>% pull(feature)
+p_value <- c()
+
+for (g in target_species){
+  wilcox <- data %>% wilcox.test(as.formula(paste0(g,"~response")), data = ., paired = FALSE)
+  p_value <- c(p_value, wilcox$p.value)
+}
+res <- data.frame(target_species, p_value) %>% mutate(p_value_adj = p.adjust(p_value, "fdr"))
+res
+```
+
+Plot relative abundance values of highly predictive species between response groups pre-training
+```{r}
+data <- data %>% mutate(response = as.character(response))
+ggp_list <- list()
+p_value <- c()
+name <- c()
+top_species <- auc_df %>% filter(is_highly_predictive) %>% pull(feature)
+for (g in top_species){
+  name <- c(name, g)
+  wilcox <- data %>% wilcox.test(as.formula(paste0(g,"~response")), data = ., paired = FALSE)
+  p_value <- c(p_value, wilcox$p.value)
+
+subtitle <- g %>% gsub("\\.sp", "\nsp", .) %>% gsub("\\.prausnitzii", "\nprausnitzii",.)
+ggp_list[[g]] <- geom_boxplot_general(data, "response",  g, "response", response_colors) +
+      labs(x = "", y = "Relative abundance", subtitle = subtitle) + scale_y_log10() + 
+      custom_theme(is_figure_small = T)#theme(legend.position = "none")
+}
+```
+
+
+```{r,  results='asis', fig.width=10, fig.height= 10}
+margin = theme(plot.margin = unit(c(0.15,0.25,0.2,0.2), "cm"))
+ggp<- gridExtra::grid.arrange(grobs = lapply(ggp_list, "+", margin),ncol = 3)
+ggsave(plot = ggp, filename = "plots/top_predictive_species_RA.png", height = 9, width =9)
+
+res <- auc_df %>% filter(is_highly_predictive) %>% 
+       mutate(p_value = p_value,
+              p_value_adj = round(p.adjust(p_value, "fdr"),4))
+res %>% filter(p_value_adj < 0.05)
+```
