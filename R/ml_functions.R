@@ -1,74 +1,5 @@
 
-calculate_simple_roc <- function(data,
-                                 features,
-                                 target,
-                                 rand_seed = 111,
-                                 train_prop = 0.7,
-                                 plot = FALSE,
-                                 smooth = TRUE){
-  ## Data preparation
-  set.seed(rand_seed)
-  data$Label <- data[[target]]
-  train_samples <- sample(rownames(data),round(nrow(data)*train_prop), replace = FALSE)
-  test_samples <- setdiff(rownames(data), train_samples)
-  train_data <- data[train_samples,]
-  test_data <- data[test_samples,]
-  if (n_distinct(train_data$Label) == 1 | n_distinct(test_data$Label) == 1){
-    stop("Train or test data include only one type of label, choose another random seed")}
-  
-  # Train and predict
-  model <- glm(as.formula(paste("Label~", paste(features, collapse = "+"))) , train_data ,family="binomial")
-  preds <- predict(model, test_data, type="response") %>% as.numeric()
-  test_data$prediction <- preds
-  roc <- pROC::roc(test_data, "Label", "prediction", plot = plot, ci = TRUE, auc = TRUE)
-  if (smooth) roc <- pROC::smooth(roc, method = "density")
-  return(roc)
-}
-
-calculate_mean_roc <- function(data,
-                                  features,
-                                  target,
-                                  rand_seeds = 111:116,
-                                  train_prop = 0.7,
-                                  plot = TRUE,
-                                  smooth = FALSE) {
-  roc_curves <- data.frame()
-  for (rand_seed in rand_seeds){
-    roc <- calculate_simple_roc(data, c(features), "response",
-                                rand_seed = rand_seed,
-                                train_prop = train_prop,
-                                plot = plot,
-                                smooth = smooth)
-    res <- data.frame(specificity = roc$specificities,
-                      sensitivity = roc$sensitivities,
-                      auc= roc$auc[[1]], rand_seed)
-    
-    res$ind <- 1:nrow(res)
-    roc_curves <- bind_rows(roc_curves, res)
-  }
-  
-  roc_curves_summarised <- roc_curves %>% group_by(ind) %>% 
-    summarise_at(vars(c("specificity", "sensitivity")), funs(mean, sd)) %>%
-    ungroup %>% arrange(desc(ind))
-  mean_auc <- roc_curves %>% select(rand_seed, auc) %>% 
-    unique() %>% pull(auc) %>% mean() %>% round(.,3)
-  
-  return(list("roc_curves_summarised" = roc_curves_summarised,
-              "mean_auc" = mean_auc))
-  }
-  
-plot_mean_roc <- function(roc_curves_summarised, mean_auc = NULL){
-  ggp <- ggplot(roc_curves_summarised, aes(specificity_mean, sensitivity_mean)) + 
-    geom_line() + scale_x_reverse() +     
-    geom_abline(slope=1, intercept = 1, linetype = "dashed", alpha=0.7, color = "black") + 
-    labs(x = 'Specificity', y = 'Sensitivity') + 
-    geom_ribbon(aes(ymax = sensitivity_mean + sensitivity_sd,
-                    ymin = sensitivity_mean - sensitivity_sd), alpha = 0.4, fill = 'steelblue')
-  
-  if (!is.null(mean_auc)) ggp <- ggp + labs(subtitle = paste("Mean AUC:", mean_auc))
-  return(ggp)
-}
-
+# Setup folds for k-fold cross validation
 .generate_cv_folds <- function(n_samples, n_ml_folds, n_ml_repeats){
   folds <- rsample::vfold_cv(
     data.frame(sample_num = 1:n_samples),
@@ -77,7 +8,7 @@ plot_mean_roc <- function(roc_curves_summarised, mean_auc = NULL){
   )
   return(folds)
 }
-## Cross validation ROC curves (based on the function get_binary_predictability)
+# Cross validation ROC curves of univariate logistic regression
 calculate_cv_roc <- function(data,
                              features,
                              target,
@@ -175,15 +106,4 @@ plot_cv_roc <- function(df_roc_plot){
     theme(legend.title = element_blank())
   
   return(p)
-}
-
-summarise_cv_auc <- function(cv_aucs){
-  summary_aucs <- cv_aucs %>%
-    mutate(is_shuffled = ifelse(shuffle_index > 0, 'shuffled_model', 'true_model')) %>%
-    group_by(is_shuffled) %>%
-    summarise(n_folds = n(),
-              mean_auc = mean(auc, na.rm = TRUE),
-              sd_auc = sd(auc, na.rm = TRUE),
-              .groups = 'drop')
-  return(summary_aucs)
 }
