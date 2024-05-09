@@ -1,7 +1,7 @@
 # ARE trial - Metabolic and gut microbiome associations with response to exercise training
 
 
-This repository contains the analysis code for the ARE collaboration trial between the Gefner and Borenstein labs. 
+This repository contains the analysis code for the ARE collaboration trial between the Gepner and Borenstein labs. 
 
 
 ## Scripts and analysis notebook overview 
