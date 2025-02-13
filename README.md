@@ -1,6 +1,6 @@
 # THE ASSOCIATIONS BETWEEN PHYSICAL ACTIVITY, MICROBIOME AND METABOLIC ADAPTATION IN SEDENTARY OVERWEIGHT ADULTS
 
-This repository contains the analysis code for the ARE collaboration trial between the Gepner and Borenstein labs. 
+This repository contains the analysis code for the collaboration between the Gepner and Borenstein labs, regarding the interaction between physical activity, microbiome and metabolic adaptation. 
 
 
 ## Scripts and analysis notebook overview 
