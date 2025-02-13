@@ -1,5 +1,4 @@
-# ARE trial - Metabolic and gut microbiome associations with response to exercise training
-
+# THE ASSOCIATIONS BETWEEN PHYSICAL ACTIVITY, MICROBIOME AND METABOLIC ADAPTATION IN SEDENTARY OVERWEIGHT ADULTS
 
 This repository contains the analysis code for the ARE collaboration trial between the Gepner and Borenstein labs. 
 
