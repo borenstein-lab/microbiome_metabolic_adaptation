@@ -1,7 +1,7 @@
 ---
 title: "Figure 2"
 author: "Alisa Greenberg"
-date: "April 2024"
+date: "April 2025"
 output:
   html_document:
     css: custom_notebook_formatting.css
@@ -21,6 +21,7 @@ library("dplyr")
 library("ggplot2")
 library("readr")
 library("tidyr")
+library("tibble")
 library("pROC") 
 
 theme_set(theme_bw())
@@ -32,17 +33,6 @@ feat_table_dir <- "feature_tables"
 ```
 
 # Data import and preparation
-```{r}
-# Data import
-extract_metadata_from_sample_name <- function(data, sample_var = "sample"){
-  data <- data %>% 
-          mutate(subject = stringr::str_extract(!!sym(sample_var),"[0-9]+"),
-                 subject = paste0("subject_",subject),
-                 timepoint = stringr::str_extract(!!sym(sample_var), "PRE|POST"),
-                 timepoint = factor(tolower(timepoint),levels = c("pre", "post")))
-  return(data)
-}
-```
 
 ```{r}
 ## Metadata
@@ -122,6 +112,7 @@ data <- metadata_subject_level %>% left_join(species_ra , by = c("subject")) %>%
 ```{r message=FALSE, warning=FALSE}
 feature_vec <- c()
 auc_vec <- c()
+auc_df <- data.frame()
 roc_df <- data.frame()
 random_seed <- 100
 
@@ -139,15 +130,86 @@ for (feature_name in features){
   roc_df <- bind_rows(roc_df, roc)
   
   auc <- cv_roc$auc[["auc"]]
+  auc_df <- rbind(auc_df, cv_roc$auc %>% mutate(feature = feature_name))
   auc_vec <- c(auc_vec, auc)
 }
-auc_df <- data.frame(feature = feature_vec, auc = auc_vec) %>%
-          mutate(target_flag = ifelse(feature %in% target_species, "Target", "Other"),
-                  is_highly_predictive = auc > 0.8)
+
+auc_df <- auc_df %>% 
+          mutate(fdr = p.adjust(p_value, method = "fdr"),
+                 target_flag = ifelse(feature %in% target_species, "Target", "Other"),
+                  is_highly_predictive = auc > 0.8, 
+                 sig_stars = case_when(fdr < 0.001 ~ "***", 
+                                       fdr < 0.01 ~ "**", 
+                                       fdr < 0.1 ~ "*",
+                                       TRUE ~"")) 
 roc_df <- roc_df %>% mutate(target_flag = ifelse(feature %in% target_species, "Target", "Other"),
                             is_highly_predictive = auc > 0.8)
 # write.csv(auc_df, "plots/auc_response_by_species_abundanc.csv")
 ```
+
+
+```{r}
+ggdata <- auc_df %>% filter(is_highly_predictive) %>% arrange(desc(auc)) %>% 
+          mutate(name_for_plotting = gsub("CAG.303", "CAG_303",feature),
+                 name_for_plotting = gsub("\\.", "\n",name_for_plotting))
+
+species_palette <- c(
+  "black",
+"#00827D",
+"#0080D2",
+"#5D74D0",
+"#AA64B3",
+"#CB5F8A",
+"#ED727F",
+"#FF8D71",
+"#FFAE65")
+names(species_palette) <- ggdata$name_for_plotting
+```
+
+### Validation
+For the sake of validation, check the feature coefficients in a one-shot feature importance analysis with a multi-variate LR (Figure S3)
+```{r, fig.height=5, fig.width=5}
+X <- data %>% select(all_of(features)) %>% as.matrix()
+y<- data$response == "Response"
+
+model <- glmnet::cv.glmnet(x = X, y = y, family = "binomial", alpha = 0.5)
+ggdata_s <- as.matrix(coef(model, s = "lambda.min"))
+ggdata_s <- ggdata_s[-1, , drop = FALSE] %>% as.data.frame() %>% 
+          filter(lambda.min != 0) %>% tibble::rownames_to_column("feature") %>% 
+          left_join(ggdata,by = "feature") %>% 
+           mutate(color = recode(as.character(name_for_plotting), !!!species_palette),
+                  color = ifelse(is.na(color), "grey", color))
+          
+ggp <- ggplot(ggdata_s, aes(reorder(feature, lambda.min), lambda.min, fill = color)) +
+      geom_col(alpha = 0.7) + coord_flip() +
+  scale_fill_identity() + 
+  labs(x = "Feature", y = "Feature coef. (Elastic Net)", fill = "Fig.2A\nhighlight",
+       subtitle = "Species with non-zero coef.\n In a multivariable LR with regularization") + 
+  scale_y_continuous(transform = "pseudo_log", 
+                     breaks = c(-100, -10, 0, 10, 100, 1000))
+plot(ggp)
+#ggsave(plot = ggp, filename = "plots/top_species_multivariate.png", height = 5, width = 5)
+```
+
+```{r}
+ggdata_w <- auc_df  %>% filter(fdr < 0.1) %>%  
+            left_join(ggdata %>% select(feature, name_for_plotting),by = "feature") %>% 
+             mutate(color = recode(as.character(name_for_plotting), !!!species_palette),
+                  color = ifelse(is.na(color), "grey", color))
+  
+ggp<- ggplot(ggdata_w, aes(reorder(feature,auc), auc, size = -log10(fdr), color = color)) + 
+  geom_point(alpha = 0.7) + geom_hline(yintercept = 0.5, linetype= "dashed") + 
+  geom_errorbar(aes(ymin = min_ci, ymax = max_ci), 
+                width = 0.3,    size = 0.5,  alpha = 0.5) +
+  coord_flip() + scale_color_identity() + 
+  labs(x = "Feature", y = "ROC AUC", fill = "Fig.2A\nhighlight", size = "-log10(FDR)",
+       subtitle = "Species with FDR < 0.1 (Mann-Whitney U test)")
+
+plot(ggp)
+#ggsave(plot = ggp, filename = "plots/top_species_auc_fdr.png", height = 5, width = 5)
+```
+
+
 
 ### Statistics - test enrichment of F.Prausnitzii subspecies in the top of the species ranking by ROCAUC
 
@@ -169,23 +231,7 @@ wilcox.test(target_auc,  Other_auc)
 ```
 
 ### Figure 2A - ROC curves for response prediction based on single-species pre-training relative abundance
-```{r}
-ggdata <- auc_df %>% filter(is_highly_predictive) %>% 
-          mutate(name_for_plotting = gsub("CAG.303", "CAG_303",feature),
-                 name_for_plotting = gsub("\\.", "\n",name_for_plotting))
 
-species_palette <- c(
-  "black",
-"#00827D",
-"#0080D2",
-"#5D74D0",
-"#AA64B3",
-"#CB5F8A",
-"#ED727F",
-"#FF8D71",
-"#FFAE65")
-names(species_palette) <- ggdata$name_for_plotting
-```
 
 ```{r}
 list_curves <- list()
@@ -259,3 +305,88 @@ res <- auc_df %>% filter(is_highly_predictive) %>%
               p_value_adj = round(p.adjust(p_value, "fdr"),4))
 res %>% filter(p_value_adj < 0.05)
 ```
+
+# Generate supplemental table S2 (functional analysis)
+
+```{r}
+run_wilcox_loop <- function(data,features, group_col, comparison_type, paired_id = NULL) {
+    results_list <- list()
+    for (ft in features) {
+      # Extract data for this feature
+      y <- data[[ft]]
+      grp <- data[[group_col]]
+      
+      tryCatch({
+        if (comparison_type == "unpaired") {
+          # Unpaired test (Mann-Whitney U)
+          test <- wilcox.test(y ~ grp)
+        } else {
+          tmp_dat <- data %>% select(all_of(c(paired_id, group_col, ft))) %>%
+            pivot_wider(names_from = all_of(group_col), values_from = all_of(ft)) %>%
+            drop_na()
+          
+          # Expecting columns 'pre' and 'post' from pivot
+          test <- wilcox.test(tmp_dat$post, tmp_dat$pre, paired = TRUE)
+        }
+        
+        results_list[[ft]] <- data.frame(
+          Feature = ft,
+          P_Value = test$p.value,
+          Statistic = test$statistic
+        )
+      }, error = function(e) { return(NULL) }) 
+    }
+    
+    res_df <- bind_rows(results_list)
+    if (nrow(res_df) > 0) {
+      res_df$FDR <- p.adjust(res_df$P_Value, method = "BH")
+      res_df <- res_df %>% arrange(P_Value)
+    }
+    return(res_df)
+ }
+```
+
+```{r}
+df_pwy <- read.delim("feature_tables/humann_pathabundance.tsv", row.names=1, check.names=FALSE)
+ df_pwy_clean <- df_pwy[!rownames(df_pwy) %in% c("UNMAPPED", "UNINTEGRATED"), ]
+ df_pwy_clean <- df_pwy_clean[!grepl("\\|", rownames(df_pwy_clean)), ]
+ row_zeros <- rowMeans(df_pwy_clean == 0)
+ 
+ cutoff_percent <- 0.9
+ ggplot(data.frame(perc_zeros = row_zeros), aes(perc_zeros)) + 
+        geom_histogram(bins = 50) + 
+        geom_vline(xintercept = cutoff_percent,  linetype= "dashed")
+ df_input <- df_pwy_clean[row_zeros <= cutoff_percent, ]
+ df_input <- sweep(df_input, 2, colSums(df_input), "/")
+ pathways <- rownames(df_input)
+ 
+cat(sprintf("Original features: %d\nFiltered features: %d\n", nrow(df_pwy), nrow(df_input)))
+ 
+df_clean <- df_input %>% t() %>% as.data.frame() %>% 
+           tibble::rownames_to_column("sample_id") %>% 
+             extract_metadata_from_sample_name("sample_id") %>% 
+             left_join(metadata %>% select(subject, response) , by = "subject") %>% 
+             mutate(sample_id = paste(subject, timepoint, sep = "_")) %>% 
+             tibble::column_to_rownames("sample_id")
+```
+
+```{r}
+df_pre <- df_clean %>% filter(timepoint == "pre")
+res_baseline <- run_wilcox_loop(df_pre,pathways, "response", "unpaired")
+res_baseline$experiment <- "pre_training_comparison"
+res_baseline %>% filter(FDR < 0.1)
+
+df_post <- df_clean %>% filter(timepoint == "post")
+res_post <- run_wilcox_loop(df_post,pathways, "response", "unpaired")
+res_post$experiment <- "post_training_comparison"
+res_post %>% filter(FDR < 0.1)
+
+res_long <- run_wilcox_loop(df_clean, pathways, "timepoint", "paired", paired_id = "subject")
+res_long$experiment <- "longitudinal_comaprison_paired"
+res_long %>% filter(FDR < 0.1)
+
+write.csv(rbind(res_pre, res_post, res_long), "plots/table_s2_functional_analysis.csv") 
+```
+
+
+

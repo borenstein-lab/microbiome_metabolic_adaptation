@@ -1,7 +1,7 @@
 ---
 title: "Figures 3 and 4 - alpha and beta diversity measures"
 author: "Alisa Greenberg"
-date: "April 2024"
+date: "April 2025"
 output:
   html_document:
     css: custom_notebook_formatting.css
@@ -31,17 +31,6 @@ feat_table_dir <- "feature_tables"
 ```
 
 # Data import and preparation
-```{r}
-# Data import
-extract_metadata_from_sample_name <- function(data, sample_var = "sample"){
-  data <- data %>% 
-          mutate(subject = stringr::str_extract(!!sym(sample_var),"[0-9]+"),
-                 subject = paste0("subject_",subject),
-                 timepoint = stringr::str_extract(!!sym(sample_var), "PRE|POST"),
-                 timepoint = factor(tolower(timepoint),levels = c("pre", "post")))
-  return(data)
-}
-```
 
 ```{r}
 ## Metadata
@@ -51,14 +40,19 @@ metadata <- read.csv("metadata/metadata.csv") %>%
 
 ```{r}
 ## Select key features for downstreatm analysis
-features <- c("subject", "response", "tdee_adaptation", "rmr_adaptation")
+features <- c("subject", "response", "tdee_adaptation", "rmr_adaptation", "vo2max_delta")
 metadata_subject_level <- metadata %>% select(features)
 ```
 
 ```{r}
 sample_mapping <- rbind(metadata_subject_level %>% mutate(timepoint = "PRE"),
                         metadata_subject_level %>% mutate(timepoint = "POST"))
-sample_mapping <- sample_mapping %>%
+
+vo2max_mes <- metadata %>% select(subject, vo2max_pre, vo2max_post) %>% 
+              tidyr::pivot_longer(cols = -subject, values_to = "vo2max", names_to ="timepoint") %>% 
+              mutate(timepoint = toupper(gsub("vo2max_","",timepoint)))
+
+sample_mapping <- sample_mapping %>% left_join(vo2max_mes, by = c("subject", "timepoint")) %>% 
                   mutate(sample = paste(subject, timepoint, sep = "_"),
                          subject_number = gsub("subject_", "", subject),
                          sample_id = paste("ARE",subject_number,timepoint,
@@ -90,7 +84,8 @@ distances_dfs <- list("Bray_Curtis"=bc, "Weighted_UniFrac"=wuf)
 ## Setup feature names for plotting
 feature_dict <- list("response" = "Response to training",
                      "tdee_adaptation" = "TDEE adaptation [Kcal]",
-                     "rmr_adaptation" = "RMR adaptation [Kcal]")
+                     "rmr_adaptation" = "RMR adaptation [Kcal]",
+                     "vo2max_delta" = "VO2 max delta")
 
 metric_dict_alpha <- list("shannon" = "Shannon",
                           "shannon_delta" = "\u0394 Shannon")
@@ -100,7 +95,7 @@ metric_dict_beta <- list("Bray_Curtis" = "Bray Curtis",
 ```
 
 # Analysis 
-## Figures 3A and S3 - beta diversity distances between response gorups and time points (PCoA)
+## Figures 3A and S4 - beta diversity distances between response gorups and time points (PCoA)
 Test if response groups create distinct clusters (rejecting H0 of the clusters having equivalent centroids and dispersion)
 
 ```{r}
@@ -121,7 +116,8 @@ for (metric_name in names(distances_dfs)){
                       sample_id_column = 'sample_id', 
                       metadata_cols_to_analyze = c("response"),
                       fdr_threshold = 1,
-                      pcoa_fill = response_colors) 
+                      pcoa_fill = response_colors,
+                      ) 
     res_list[[metric_name]] <- res$plots
     pval <- res$results %>% mutate(feature = metric_name)
     pvals <- rbind(pvals, pval)
@@ -146,7 +142,22 @@ for (metric_name in names(distances_dfs)){
     print(paste("####", metric_name, "####"))
     print(abd)
     print(pbd)
-
+    
+    ## Plot distances from group centroid
+    ggdata <- data.frame(bd$distances) %>% tibble::rownames_to_column("sample_id") %>% 
+                left_join(sample_mapping, by = "sample_id")
+      
+    ggp <- geom_boxplot_general(ggdata, "response", "bd.distances",color_var = "response",
+                           group_var = NULL, palette = response_colors) +
+                labs(y = paste(metric_dict_beta[[metric_name]], "\n distance from group center")) +
+                custom_theme(is_figure_small = T)
+      
+    wilcox <- wilcox.test(data = ggdata, bd.distances ~ response, paired = F)
+    print(paste(metric_name,"distance from center differences: p = ", wilcox$p.value))      
+    
+    ggsave(plot = ggp, filename = glue::glue("plots/response_{metric_name}_dist_from_center.png"),
+    height = 4, width = 4)
+        
     ## Plot PCoA
     arrow_positions <- res_list[[metric_name]][["response_pc1&pc2"]]$data %>% 
                        select(subject, timepoint,response, Axis.1, Axis.2) %>% 
@@ -161,12 +172,27 @@ for (metric_name in names(distances_dfs)){
                     y = Axis.2_PRE, yend = Axis.2_POST),
                 arrow = arrow(length=unit(0.2,"cm")), size = 0.25) 
     plot(ggp)
-    ggp
     ggsave(plot = ggp + custom_theme() ,height = 4, width = 4,  filename = glue::glue("plots/pcoa_{metric_name}.png"))
+    
+    
+
 }
 legend <- ggp %>% cowplot::get_legend() %>% ggpubr::as_ggplot()
-ggsave(plot = legend ,height = 4, width = 4,  filename = glue::glue("plots/pcoa_legend.png"))
+#ggsave(plot = legend ,height = 4, width = 4,  filename = glue::glue("plots/pcoa_legend.png"))
 ```
+
+```{r}
+ggdata <- data.frame(bd$distances) %>% tibble::rownames_to_column("sample_id") %>% 
+          left_join(sample_mapping, by = "sample_id") %>% rename(bd_dist = "bd.distances")
+
+geom_boxplot_general(ggdata, "response", "bd_dist",color_var = "response",
+                     group_var = NULL, palette = response_colors) +
+          labs(y = metric_dict_beta[[metric_name]]) +
+          custom_theme(is_figure_small = T)
+
+wilcox.test(data = ggdata, bd_dist ~ response, paired = F)
+```
+
 
 ```{r}
 df_list <- list()
@@ -248,7 +274,7 @@ ggdata <- alpha_diversity %>% filter(timepoint == "pre") %>%
 ```
 
 ```{r, fig.width= 4, fig.height = 4}
-features <- c("tdee_adaptation", "rmr_adaptation")
+features <- c("tdee_adaptation", "rmr_adaptation", "vo2max_delta")
 for (alpha_div in c(names(metric_dict_alpha))){
   for (feature in features){
     ggp <- geom_point_with_corr(ggdata, alpha_div, feature, color_var = "response") + 

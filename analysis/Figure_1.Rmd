@@ -1,7 +1,7 @@
 ---
 title: "Figure 1"
 author: "Alisa Greenberg"
-date: "April 2024"
+date: "April 2025"
 output:
   html_document:
     css: custom_notebook_formatting.css
@@ -168,20 +168,8 @@ ggsave(ggp_response, filename = glue::glue("plots/{feature}_response_boxplot.png
 
 ### Suplementory figure S1 - Pre-training values of possible confounders between response groups
 
-Test differences in categorical features (gender) by a Fisher test
-```{r, fig.height=3, fig.width=3}
-pval <- (metadata %>% select(gender, response) %>% table() %>% fisher.test())$p.value
 
-ggp <- ggplot(metadata %>% count(gender, response),
-       aes(gender,response, fill = n, label = n )) + 
-       scale_fill_gradient(low = "#FFAE65", high = "#cb5f8a") + 
-       geom_tile(alpha = 0.7) + geom_label(fill = "white") + custom_theme() + 
-       labs(x = "Subject gender", y = "Response to training",
-            fill = "# subjects", 
-            subtitle = paste("Fisher's exact test\np-value:", round(pval,4)))
-ggp
-ggsave(ggp, filename = "plots/response_gender_fisher.png", width =2.5, height = 2.5)
-```
+
 
 Test differences in pre-training continues features across groups (FDR corrected wilcox rank-sum test)
 ```{r}
@@ -193,7 +181,7 @@ feature_names <- c("Age [years]", "BMI pre training",
 names(feature_names) <- features
 ```
 
-```{r fig.height= 6, fig.width=6}
+```{r fig.height= 8, fig.width=9}
 ggp_list <- list()
 pvals <- c()
 
@@ -205,9 +193,45 @@ ggp_list[[feature]] <- geom_boxplot_general(metadata, "response",  feature, "res
   wilcox <- metadata %>% wilcox.test(as.formula(paste0(feature,"~response")), data = ., paired = FALSE)
   pvals <- c(pvals, wilcox$p.value)
 }
+```
+Caloric intake pre vs post
+```{r, fig.height=3, fig.width=4.5}
+ggdata <- metadata %>% select(subject, response, kcal_pre, kcal_post) %>% 
+  tidyr::pivot_longer(cols = c("kcal_pre", "kcal_post"), names_to = "timepoint", values_to = "kcal") %>% 
+  mutate(timepoint = factor(ifelse(timepoint == "kcal_pre", "pre-training", "post-training"), levels = c("pre-training", "post-training")))
+
+for (r_status in c("Response", "No response")){
+  data_subset <- metadata %>% filter(response == r_status)
+  wilcox <- wilcox.test(data_subset$kcal_pre, data_subset$kcal_post, paired = TRUE)
+  feature_names[paste("caloric intake pre-post", r_status)] <- paste("caloric intake pre-post", r_status)
+  pvals <- c(pvals, wilcox$p.value)
+}  
+ggp <- geom_boxplot_general(ggdata, "timepoint",  "kcal", "response", response_colors) + 
+  labs(x = "", y = "Mean Caloric intake [Kcal/day]") + 
+  facet_wrap(~response) + theme(legend.position = "none") + custom_theme(is_figure_small = T)
+ggp
+#ggsave(ggp, filename = "plots/confounding_response_features_boxplot_addition.png", width =6, height = 3)
+```
+Test differences in categorical features (gender) by a Fisher test
+```{r, fig.height=3, fig.width=3}
+pval <- (metadata %>% select(gender, response) %>% table() %>% fisher.test())$p.value
+pvals <- c(pvals, pval)
+feature_names <- c(feature_names, "Gender")
+ggp <- ggplot(metadata %>% count(gender, response),
+       aes(gender,response, fill = n, label = n )) + 
+       scale_fill_gradient(low = "#FFAE65", high = "#cb5f8a") + 
+       geom_tile(alpha = 0.7) + geom_label(fill = "white") + custom_theme() + 
+       labs(x = "Subject gender", y = "Response to training",
+            fill = "# subjects")
+ggp
+#ggsave(ggp, filename = "plots/response_gender_fisher.png", width =2.5, height = 2.5)
+```
+
+```{r fig.height= 8, fig.width=9}
 pvals_adj <- p.adjust(pvals, method = "fdr")
-res <- data.frame(feature_names, round(pvals,4), round(pvals_adj,4))
+res <- data.frame(feature_names, pvals = round(pvals,2), fdr = round(pvals_adj,2))
 res
 ggp <- do.call(gridExtra::grid.arrange,  c(ggp_list, ncol = 3, top = ""))
-ggsave(ggp, filename = "plots/confounding_response_features_boxplot.png", width =9, height = 8)
+#ggsave(ggp, filename = "plots/confounding_response_features_boxplot.png", width =9, height = 8)
 ```
+
